@@ -1,0 +1,5 @@
+{
+  "name": "Video Start/End Frame Extractor",
+  "description": "A simple tool to extract and display the first and last frames of a video file using client-side processing.",
+  "requestFramePermissions": []
+}
