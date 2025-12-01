@@ -1,10 +1,10 @@
 DEVELOPED USING GOOGLE AI STUDIO
 
-# Run and deploy your AI Studio app
+# Run Demo on AI Studio app
 
-This contains everything you need to run your app locally.
+This contains everything you need to run your app on Google AI Studio.
 
-View your app in AI Studio: https://ai.studio/apps/drive/1s4HkYRbhEBGAcoDpJs8jeX-mbfb5xeuy
+View app in AI Studio: https://ai.studio/apps/drive/1s4HkYRbhEBGAcoDpJs8jeX-mbfb5xeuy
 
 ## Run Locally
 
