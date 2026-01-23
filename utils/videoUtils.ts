@@ -15,25 +15,41 @@ export const formatDuration = (seconds: number): string => {
   return `${mins}:${secs.toString().padStart(2, '0')}`;
 };
 
-const captureFrame = (video: HTMLVideoElement): string => {
-  const canvas = document.createElement('canvas');
-  canvas.width = video.videoWidth;
-  canvas.height = video.videoHeight;
-  const ctx = canvas.getContext('2d');
-  if (!ctx) throw new Error('Could not get canvas context');
-  
-  ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
-  return canvas.toDataURL('image/jpeg', 0.9);
+const captureFrame = (video: HTMLVideoElement, logger: (msg: string) => void): string => {
+  try {
+    const canvas = document.createElement('canvas');
+    canvas.width = video.videoWidth;
+    canvas.height = video.videoHeight;
+    const ctx = canvas.getContext('2d');
+    if (!ctx) throw new Error('Could not get canvas context');
+    
+    // Draw the current frame
+    ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+    
+    // Check if the frame is empty (black) - optional debug check could go here
+    // const pixel = ctx.getImageData(0, 0, 1, 1).data;
+    // logger(`Captured frame pixel at 0,0: rgba(${pixel[0]},${pixel[1]},${pixel[2]},${pixel[3]})`);
+
+    return canvas.toDataURL('image/jpeg', 0.9);
+  } catch (e: any) {
+    logger(`Error capturing frame: ${e.message}`);
+    throw e;
+  }
 };
 
-const seekToPromise = (video: HTMLVideoElement, time: number): Promise<void> => {
+const seekToPromise = (video: HTMLVideoElement, time: number, logger: (msg: string) => void): Promise<void> => {
   return new Promise((resolve, reject) => {
+    logger(`Seeking to ${time.toFixed(4)}s...`);
+    
     const onSeeked = () => {
+      logger(`Event: 'seeked' fired for ${time.toFixed(4)}s`);
       video.removeEventListener('seeked', onSeeked);
       video.removeEventListener('error', onError);
       resolve();
     };
-    const onError = () => {
+    
+    const onError = (e: Event) => {
+      logger(`Error during seek: ${(e as any).message || 'Unknown error'}`);
       video.removeEventListener('seeked', onSeeked);
       video.removeEventListener('error', onError);
       reject(new Error('Error seeking video'));
@@ -41,37 +57,97 @@ const seekToPromise = (video: HTMLVideoElement, time: number): Promise<void> => 
 
     video.addEventListener('seeked', onSeeked);
     video.addEventListener('error', onError);
+    
     video.currentTime = time;
   });
 };
 
-export const extractFramesFromVideo = async (file: File): Promise<{ frames: FrameData; metadata: VideoMetadata }> => {
+export type LogCallback = (message: string) => void;
+
+export const extractFramesFromVideo = async (
+  file: File, 
+  logger: LogCallback = console.log
+): Promise<{ frames: FrameData; metadata: VideoMetadata }> => {
   return new Promise((resolve, reject) => {
-    const video = document.createElement('video');
-    video.preload = 'metadata';
-    video.muted = true;
-    video.playsInline = true;
+    logger(`Starting process for: ${file.name} (${file.type}, ${formatBytes(file.size)})`);
     
+    // 1. Create Video Element
+    const video = document.createElement('video');
+    
+    // Important attributes for iOS
+    video.setAttribute('playsinline', 'true');
+    video.setAttribute('webkit-playsinline', 'true');
+    video.muted = true;
+    video.preload = 'auto'; // 'auto' helps iOS buffer faster than 'metadata'
+    
+    // 2. Append to DOM (Crucial for iOS Safari)
+    // iOS often suspends media loading if the element is not in the DOM.
+    video.style.position = 'fixed';
+    video.style.top = '-9999px';
+    video.style.left = '-9999px';
+    video.style.width = '10px';
+    video.style.height = '10px';
+    video.style.opacity = '0';
+    video.style.pointerEvents = 'none';
+    document.body.appendChild(video);
+    logger('Video element created and appended to DOM (hidden).');
+
     const objectUrl = URL.createObjectURL(file);
     video.src = objectUrl;
+    logger(`Blob URL created: ${objectUrl}`);
 
-    video.onloadeddata = async () => {
+    // Cleanup function
+    const cleanup = () => {
+      logger('Cleaning up resources...');
+      if (video.parentNode) {
+        document.body.removeChild(video);
+      }
+      video.removeAttribute('src');
+      video.load(); // Reset
+      URL.revokeObjectURL(objectUrl);
+    };
+
+    // Error handling
+    video.onerror = (e) => {
+      const err = video.error;
+      const msg = err ? `Code ${err.code}: ${err.message}` : 'Unknown video error';
+      logger(`Video Error: ${msg}`);
+      cleanup();
+      reject(new Error(`Failed to load video: ${msg}`));
+    };
+
+    // 3. Wait for Metadata
+    video.onloadedmetadata = async () => {
+      logger('Event: loadedmetadata fired.');
+      
       try {
         const duration = video.duration;
         const width = video.videoWidth;
         const height = video.videoHeight;
+        
+        logger(`Metadata: Duration=${duration.toFixed(3)}s, Size=${width}x${height}`);
 
-        // 1. Capture First Frame (at 0s)
-        await seekToPromise(video, 0);
-        const firstFrame = captureFrame(video);
+        if (!Number.isFinite(duration) || duration === 0) {
+            throw new Error('Invalid video duration (0 or Infinity).');
+        }
 
-        // 2. Capture Last Frame
-        // Seek very close to the end.
-        // 60fps frame duration is ~0.016s. 
-        // Using 0.001s (1ms) buffer ensures we are well within the last frame for any standard frame rate (up to ~1000fps).
+        // --- Extract First Frame ---
+        // Even though currentTime is 0, we explicitly seek to ensure 'seeked' fires and frame is ready.
+        await seekToPromise(video, 0, logger);
+        
+        // Small delay to ensure rendering on some devices
+        // await new Promise(r => setTimeout(r, 50)); 
+        
+        const firstFrame = captureFrame(video, logger);
+        logger('First frame captured.');
+
+        // --- Extract Last Frame ---
+        // 1ms buffer from the end
         const seekTime = Math.max(0, duration - 0.001);
-        await seekToPromise(video, seekTime);
-        const lastFrame = captureFrame(video);
+        await seekToPromise(video, seekTime, logger);
+        
+        const lastFrame = captureFrame(video, logger);
+        logger('Last frame captured.');
 
         const metadata: VideoMetadata = {
           name: file.name,
@@ -81,23 +157,33 @@ export const extractFramesFromVideo = async (file: File): Promise<{ frames: Fram
           height
         };
 
+        cleanup();
+        logger('Processing complete. Resolving promise.');
         resolve({
           frames: { firstFrame, lastFrame },
           metadata
         });
 
-      } catch (error) {
+      } catch (error: any) {
+        logger(`Exception during processing: ${error.message}`);
+        cleanup();
         reject(error);
-      } finally {
-        URL.revokeObjectURL(objectUrl);
-        video.remove();
       }
     };
 
-    video.onerror = () => {
-      URL.revokeObjectURL(objectUrl);
-      video.remove();
-      reject(new Error('Failed to load video file.'));
-    };
+    // 4. Trigger Load
+    logger('Calling video.load() to start buffering...');
+    video.load();
+
+    // Safety Timeout for iOS hanging
+    setTimeout(() => {
+        if (video.readyState < 1) { // HAVE_METADATA = 1
+            const msg = 'Timeout waiting for video metadata. iOS Safari might be blocking the load.';
+            logger(`Error: ${msg}`);
+            // Don't auto-reject here immediately to allow very slow networks, 
+            // but usually 15s is enough for local blobs.
+            // reject(new Error(msg)); // Optional: strict timeout
+        }
+    }, 15000);
   });
 };
